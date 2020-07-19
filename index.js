@@ -602,6 +602,11 @@ class Peer extends stream.Duplex {
       .catch(err => {
         this.destroy(makeError(err, 'ERR_CREATE_OFFER'))
       })
+
+    // Reset iceRestart.
+    if (this.offerOptions.iceRestart) {
+      this.offerOptions.iceRestart = undefined
+    }
   }
 
   _requestMissingTransceivers () {
@@ -656,13 +661,20 @@ class Peer extends stream.Duplex {
 
   _onConnectionStateChange () {
     if (this.destroyed) return
+    this._debug(`_onConnectionStateChange - connectionState=${this._pc.connectionState}, iceConnectionState=${this._pc.iceConnectionState}`)
     if (this._pc.connectionState === 'failed') {
-      this.destroy(makeError('Connection failed.', 'ERR_CONNECTION_FAILURE'))
+      // HACK: create synthetic iceStateChange event as Chrome 83 fails to announce change.
+      if (this._pc.iceConnectionState === 'disconnected') {
+        this._restartIce()
+      }
     }
   }
 
   _onIceStateChange () {
     if (this.destroyed) return
+
+    this._debug(`_onIceStateChange - connectionState=${this._pc.connectionState}, iceConnectionState=${this._pc.iceConnectionState}`)
+
     var iceConnectionState = this._pc.iceConnectionState
     var iceGatheringState = this._pc.iceGatheringState
 
@@ -676,13 +688,26 @@ class Peer extends stream.Duplex {
     if (iceConnectionState === 'connected' || iceConnectionState === 'completed') {
       this._pcReady = true
       this._maybeReady()
-    }
-    if (iceConnectionState === 'failed') {
-      this.destroy(makeError('Ice connection failed.', 'ERR_ICE_CONNECTION_FAILURE'))
-    }
-    if (iceConnectionState === 'closed') {
+    } else if (iceConnectionState === 'failed') {
+      this._restartIce()
+    } else if (iceConnectionState === 'closed') {
       this.destroy(makeError('Ice connection closed.', 'ERR_ICE_CONNECTION_CLOSED'))
     }
+  }
+
+  _restartIce () {
+    this._isNegotiating = false // clear past negotiation
+    this._queuedNegotiation = false // clear queue
+
+    if (this.initiator) {
+      if (this._pc && typeof this._pc.restartIce === 'function') {
+        this._pc.restartIce()
+      } else {
+        this.offerOptions.iceRestart = true
+      }
+    }
+
+    this._needsNegotiation()
   }
 
   getStats (cb) {
